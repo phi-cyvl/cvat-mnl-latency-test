@@ -20,6 +20,9 @@ info "phase 2 — launch test EC2"
 state_load
 require_auth
 
+: "${CVAT_TARGET:?Set CVAT_TARGET to your CVAT hostname (e.g. export CVAT_TARGET=cvat.example.com)}"
+: "${CVAT_JOB_ID:?Set CVAT_JOB_ID to a valid CVAT job ID (e.g. export CVAT_JOB_ID=12345)}"
+
 # Sanity check the loaded state
 : "${RUN_ID:?missing RUN_ID — re-run 01-provision.sh}"
 : "${SUBNET_ID:?missing SUBNET_ID — re-run 01-provision.sh}"

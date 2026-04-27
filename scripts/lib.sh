@@ -11,11 +11,11 @@
 : "${ZONE_GROUP:=ap-southeast-1-mnl-1}"
 : "${PROJECT_TAG:=cvat-mnl-test}"
 
-# Required: set before running.
 # CVAT_TARGET  — hostname of your CVAT instance (no https://, no trailing slash)
 # CVAT_JOB_ID  — a valid CVAT job ID to probe on the chunk endpoint
-: "${CVAT_TARGET:?Set CVAT_TARGET to your CVAT hostname (e.g. export CVAT_TARGET=cvat.example.com)}"
-: "${CVAT_JOB_ID:?Set CVAT_JOB_ID to a valid CVAT job ID (e.g. export CVAT_JOB_ID=12345)}"
+# Both are validated in 02-launch.sh, which is where they're consumed.
+: "${CVAT_TARGET:=}"
+: "${CVAT_JOB_ID:=}"
 
 # Project root = the dir containing the scripts/ folder
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
