@@ -37,14 +37,18 @@ state_set AMI_ID "$AMI_ID"
 ok "AMI: $AMI_ID"
 
 # AWS CLI has no built-in PUT-presign — boto3 (already a dep of awscli) does.
-# s3v4 is required for the regional endpoint signatures used by Local Zone.
+# Force the regional path-style endpoint: boto3's default virtual-hosted URL
+# (`bucket.s3.amazonaws.com`) returns a 301 to the regional endpoint, and
+# curl --upload-file doesn't follow PUT redirects → silent upload failure.
 info "generating presigned S3 PUT URLs (1-hour expiry)"
 gen_presigned_put() {
   python3 - "$BUCKET" "$1" "$REGION" <<'PY'
 import sys, boto3
 from botocore.config import Config
 bucket, key, region = sys.argv[1], sys.argv[2], sys.argv[3]
-s3 = boto3.client("s3", region_name=region, config=Config(signature_version="s3v4"))
+s3 = boto3.client("s3", region_name=region,
+    endpoint_url=f"https://s3.{region}.amazonaws.com",
+    config=Config(signature_version="s3v4"))
 print(s3.generate_presigned_url("put_object",
     Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600, HttpMethod="PUT"))
 PY
