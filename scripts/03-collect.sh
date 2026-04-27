@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# 03-collect.sh — wait for results, download, summarize.
+# Wait for the test EC2 to upload its done.txt marker, then download the
+# results bundle and print a one-screen summary.
 #
-# The test script writes `s3://$BUCKET/$RUN_ID/done.txt` as its last step.
-# We poll for that marker (up to 10 min), then download the bundle and
-# print a summary. If the marker never appears, we fetch the EC2 console
-# output as a debugging aid.
-#
-# Output:
-#   results/<RUN_ID>/...   extracted measurement files
-#   stdout                  one-screen summary
+# Why poll: the EC2 has no SSH access (egress-only SG). The done.txt marker
+# is the only signal that uploads finished — test.sh writes it last. If the
+# marker never appears, fetch console output to diagnose.
 
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
@@ -24,7 +20,6 @@ require_auth
 DEST_DIR="$RESULTS_DIR/$RUN_ID"
 mkdir -p "$DEST_DIR"
 
-# ---- poll for the done marker ----------------------------------------------
 log "polling s3://$BUCKET/$RUN_ID/done.txt (up to 10 min, every 15 s)..."
 SAW_DONE=""
 for i in $(seq 1 40); do
@@ -43,18 +38,15 @@ if [[ -z "$SAW_DONE" ]]; then
   aws ec2 get-console-output --region "$REGION" --instance-id "$INSTANCE_ID" \
     --query Output --output text > "$DEST_DIR/console.txt" 2>&1 || true
   warn "console output saved to $DEST_DIR/console.txt"
-  warn "try: tail -100 $DEST_DIR/console.txt"
   exit 2
 fi
 
-# ---- download bundle --------------------------------------------------------
 info "downloading bundle"
 aws s3 sync "s3://$BUCKET/$RUN_ID/" "$DEST_DIR/" >/dev/null
 [[ -f "$DEST_DIR/results.tgz" ]] || die "results.tgz missing"
 tar xzf "$DEST_DIR/results.tgz" -C "$DEST_DIR" --strip-components=1
 ok "extracted to $DEST_DIR"
 
-# ---- summary ---------------------------------------------------------------
 echo
 echo "===================================================================="
 echo "  CVAT MNL latency test — summary  (run $RUN_ID)"

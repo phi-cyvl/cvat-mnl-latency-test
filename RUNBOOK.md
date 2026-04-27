@@ -1,97 +1,64 @@
 # Runbook
 
-Step-by-step operator guide.
-
 ## Prereqs
 
-- AWS SSO authenticated with EC2 + VPC + S3 + IAM permissions in `ap-southeast-1`:
-  ```bash
-  aws sso login
-  aws sts get-caller-identity   # confirms identity
-  ```
-- `aws` CLI v2, `jq`, `curl`, `bash` 4+.
-- Required env vars:
-  ```bash
-  export CVAT_TARGET=cvat.example.com   # your CVAT hostname, no https://
-  export CVAT_JOB_ID=12345              # valid job ID for chunk probing
-  ```
-
-## End-to-end run
-
 ```bash
-./run.sh
+aws sso login
+aws sts get-caller-identity   # confirm identity
+
+export CVAT_TARGET=cvat.example.com   # your CVAT hostname (no scheme)
+export CVAT_JOB_ID=12345              # valid job ID for chunk probing
 ```
 
-Runs phases 00 → 04 in order, prompting before teardown so you can inspect
-the results. Set `NO_TEARDOWN=1` to skip the prompt.
+Tools: `aws` CLI v2, `python3` (with `boto3` — installed by awscli), `jq`,
+`bash` 4+. AWS perms: EC2 + VPC + S3 in `ap-southeast-1`. No IAM perms needed.
+
+## End-to-end
+
+```bash
+./run.sh                # phases 00 → 04, prompts before teardown
+NO_TEARDOWN=1 ./run.sh  # keep infra up after the run
+```
 
 ## Per-phase
 
 ### `00-prereqs.sh`
 
-Idempotent. Verifies auth and opts in the MNL Local Zone. Opt-in is
-account-level and persists.
-
-```bash
-./scripts/00-prereqs.sh
-```
-
-What it does:
-1. `aws sts get-caller-identity` — bail if expired.
-2. Reads `ap-southeast-1-mnl-1a` opt-in status.
-3. If `not-opted-in`, calls `modify-availability-zone-group` and polls until ready (~30 s).
+Verifies auth and opts in the MNL Local Zone (one-time, persistent, free).
+Idempotent.
 
 ### `01-provision.sh`
 
-Creates throwaway infrastructure for one run. Each invocation gets a fresh
-`RUN_ID` (timestamp) and tags every resource with `Project=cvat-mnl-test,
-RunId=<RUN_ID>`. Saves IDs to `state/infra.env`.
+Creates: VPC `10.42.0.0/16`, IGW, subnet `10.42.1.0/24` in
+`ap-southeast-1-mnl-1a`, route table → IGW, security group (egress-only,
+no ingress), S3 bucket with SSE-S3 + 7-day lifecycle. Tags every resource
+with `Project=cvat-mnl-test, RunId=<RUN_ID>`. Saves IDs to `state/infra.env`.
 
-```bash
-./scripts/01-provision.sh
-```
-
-Resources created:
-- VPC `10.42.0.0/16`
-- Internet Gateway, attached
-- Subnet `10.42.1.0/24` in `ap-southeast-1-mnl-1a`, auto-assign public IP
-- Route table with default route → IGW
-- Security Group — egress 0.0.0.0/0, no ingress
-- S3 bucket with SSE-S3 + 7-day lifecycle expiration
-- IAM role with inline policy granting `s3:PutObject` to the results bucket only
-- Instance profile wrapping the role
+No IAM resources are created (see 02-launch.sh for why).
 
 ### `02-launch.sh`
 
-Launches t3.medium in the MNL subnet with the test script as user-data.
-The instance runs the test, uploads results to S3, and terminates itself.
-
-```bash
-./scripts/02-launch.sh
-```
-
-What it does:
-1. Looks up the latest Amazon Linux 2023 AMI in `ap-southeast-1`.
-2. Renders `userdata/test.sh` substituting `__BUCKET__`, `__RUN_ID__`,
-   `__TARGET__`, `__JOB_ID__`.
-3. Launches with `--instance-initiated-shutdown-behavior terminate` so
-   `shutdown -h now` inside the test also terminates the instance.
+1. Looks up the latest AL2023 x86_64 AMI in `ap-southeast-1`.
+2. Generates 3 presigned S3 PUT URLs (1-hour expiry) using boto3 — one each
+   for `results.tgz`, `test.log`, `done.txt`.
+3. Renders `userdata/test.sh` substituting RUN_ID, target, job ID, and the
+   three presigned URLs.
+4. Launches a t3.medium with:
+   - `gp2` root volume (MNL Local Zone doesn't support `gp3`)
+   - IMDSv2 required
+   - `instance-initiated-shutdown=terminate` so `shutdown -h now` from inside
+     the test ends billing
 
 ### `03-collect.sh`
 
-Polls S3 for the `done.txt` marker (written by the test script at the end).
-Up to 10 min wait, 15 s poll interval. Downloads the bundle and prints a summary.
-
-```bash
-./scripts/03-collect.sh
-```
-
-Summary: geo confirmation, median ping RTT, mtr final-hop, TLS handshake
-P50/P95, chunk fetch timings.
+Polls `s3://$BUCKET/$RUN_ID/done.txt` (15 s interval, 10 min cap). Once
+seen, downloads the bundle, extracts to `results/<RUN_ID>/`, prints summary
+(geo, ping P50/loss, mtr last hop, TLS handshake P50/P95, chunk timings).
 
 ### `04-teardown.sh`
 
-Destroys infra in dependency-safe order. Keeps the S3 results bucket by default.
+Destroys infra in dependency-safe order: instance → SG → RT → subnet → IGW →
+VPC. Bucket kept by default (lifecycle expires in 7 days).
 
 ```bash
 ./scripts/04-teardown.sh                    # keep bucket
@@ -100,32 +67,26 @@ Destroys infra in dependency-safe order. Keeps the S3 results bucket by default.
 
 ### `teardown-everything.sh`
 
-Brute-force cleanup — finds and destroys every resource tagged
-`Project=cvat-mnl-test`, regardless of run ID. Use when state is lost.
+Brute-force cleanup of all `Project=cvat-mnl-test`-tagged resources.
+Use when `state/infra.env` is missing or stale.
 
 ```bash
-./scripts/teardown-everything.sh --confirm
+./scripts/teardown-everything.sh --confirm                     # keep buckets
+./scripts/teardown-everything.sh --confirm --include-buckets   # nuke too
 ```
 
 ## Troubleshooting
 
-### EC2 launches but never writes to S3
+**EC2 launches but `done.txt` never appears.** No SSH (egress-only SG).
+03-collect.sh dumps console output to `results/<RUN_ID>/console.txt` on
+timeout. Common causes: presigned URL expired (>1 h elapsed), `mtr` failed
+to install (script falls back and still uploads partial results).
 
-SSH isn't available (no inbound rules). Debug via console output:
+**Local Zone opt-in stuck `not-opted-in`.** Re-run `00-prereqs.sh` —
+propagation can take >60 s.
 
-```bash
-aws ec2 get-console-output --region ap-southeast-1 \
-  --instance-id <INSTANCE_ID> --query Output --output text
-```
+**`InvalidSubnet.Range` / VPC limit error.** Default VPC limit is 5. Run
+`./scripts/teardown-everything.sh --confirm` to clean stale runs.
 
-Common causes:
-- IAM role propagation race — wait 30 s and retry.
-- `mtr` package missing — the script falls back to ping/curl only and still uploads.
-
-### "InvalidSubnet.Range" or VPC limit error
-
-Default VPC limit is 5. Clean up old runs with `teardown-everything.sh --confirm`.
-
-### Local Zone opt-in not propagating
-
-Re-run `00-prereqs.sh` — it's idempotent. Propagation typically takes < 60 s.
+**`VolumeTypeNotAvailableInZone`.** MNL Local Zone doesn't support `gp3`.
+02-launch.sh forces `gp2` — if you change the launch flags, keep that.
