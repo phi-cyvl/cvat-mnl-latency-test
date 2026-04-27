@@ -1,0 +1,7 @@
+# Runtime state — IDs, rendered user-data, results bundles
+state/
+results/
+
+# Internal investigation notes — keep local only
+john-investigation.md
+HYPOTHESIS.md
